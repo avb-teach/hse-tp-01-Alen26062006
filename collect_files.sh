@@ -2,7 +2,7 @@
 
 usage() {
     echo "Использование: $0 [--max_depth N] <входная_директория> <выходная_директория>"
-    echo "  --max_depth N  Сохранить структуру директорий до глубины N"
+    echo "  --max_depth N  Ограничить уровень вложенности структуры директорий значением N"
     echo "                 (если не указано, все файлы копируются в корень выходной директории)"
     exit 1
 }
@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
                 MAX_DEPTH_SET=true
                 shift 2
             else
-                echo "Ошибка: --max_depth требует числовой аргумент"
+                echo "Ошибка: --max_depth требует числового аргумента"
                 usage
             fi
             ;;
@@ -32,12 +32,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ $# -ne 2 ]; then
-    echo "Ошибка: требуется два позиционных аргумента."
+    echo "Ошибка: требуется два позиционных аргумента (входная и выходная директории)."
     usage
 fi
 
-INPUT_DIR="$1"
-OUTPUT_DIR="$2"
+INPUT_DIR="$(realpath "$1")"
+OUTPUT_DIR="$(realpath "$2")"
 
 if [ ! -d "$INPUT_DIR" ]; then
     echo "Ошибка: входная директория '$INPUT_DIR' не существует."
@@ -47,19 +47,17 @@ fi
 if [ ! -d "$OUTPUT_DIR" ]; then
     mkdir -p "$OUTPUT_DIR"
     if [ $? -ne 0 ]; then
-        echo "Ошикба: не удалось создать выходную директорию '$OUTPUT_DIR'."
+        echo "Ошибка: не удалось создать выходную директорию '$OUTPUT_DIR'."
         exit 1
     fi
-    echo "Создана выходная директория: $OUTPUT_DIR."
+    echo "Создана выходная директория: $OUTPUT_DIR"
 fi
 
-files_count=0
-errors_count=0
+duplicate_count=0
 
 get_unique_filename() {
-    local base_path="$1"
+    local target_dir="$1"
     local filename="$2"
-    local target_dir="$3"
     local name
     local extension
     local target_file
@@ -73,107 +71,105 @@ get_unique_filename() {
         extension=""
     fi
 
-    target_file="$target_dir/$base_path/$filename"
+    target_file="$target_dir/$filename"
+
     while [ -e "$target_file" ]; do
-        target_file="$target_dir/$base_path/${name}${counter}${extension}"
+        target_file="$target_dir/${name}${counter}${extension}"
         ((counter++))
     done
 
-    if [ -z "$base_path" ]; then
-        echo "$(basename "$target_file")"
-    else
-        echo "$base_path/$(basename  "$target_file")"
-    fi
+    basename "$target_file"
 }
 
-process_file_with_depth() {
+process_with_max_depth() {
     local file="$1"
-    local input_dir="$2"
-    local output_dir="$3"
+    local input_base="$2"
+    local output_base="$3"
     local max_depth="$4"
 
-    local rel_path="${file#$input_dir/}"
-    local depth=$(echo "$rel_path" | tr -cd '/' | wc -c)
-    local target_path=""
+    local rel_path="${file#$input_base/}"
+    local filename=$(basename "$rel_path")
+    local dir_path=$(dirname "$rel_path")
 
-    if [ "$depth" -le "$max_depth" ]; then
-        target_path=$(dirname "$rel_path")
-    else
-        target_path=$(echo "$rel_path" | cut -d'/' -f1-"$max_depth")
-        if [ -f "$input_dir/$target_path" ]; then
-            target_path=$(dirname "$target_path")
-        fi
+    if [ "$dir_path" = "." ]; then
+        dir_path=""
     fi
 
-    if [ ! -z "$target_path" ] && [ "$target_path" != "." ]; then
-        mkdir -p "$output_dir/$target_path"
-        if [ $? -ne 0 ]; then
-            echo "Ошибка: не удалось создать директорию '$output_dir/$target_path'"
-            ((errors_count++))
-            return
-        fi
+    local depth=$(echo "$dir_path" | tr -cd '/' | wc -c)
+
+    local target_dir_path
+    if [ -z "$dir_path" ]; then
+        target_dir_path="$output_base"
+    elif [ "$depth" -lt "$max_depth" ]; then
+        target_dir_path="$output_base/$dir_path"
     else
-        target_path=""
+        local parts=($(echo "$dir_path" | tr '/' ' '))
+        target_dir_path="$output_base"
+
+        for ((i=0; i<max_depth; i++)); do
+            if [ "${parts[$i]}" ]; then
+                target_dir_path="$target_dir_path/${parts[$i]}"
+            fi
+        done
     fi
 
-    local filename=$(basename "$file")
-    local unique_path=$(get_unique_filename "$target_path" "$filename" "$output_dir")
-
-    if [ -z "$target_path" ]; then
-        cp "$file" "$output_dir/$unique_path"
-    else
-        cp "$file" "$output_dir/$unique_path"
+    mkdir -p "$target_dir_path"
+    if [ $? -ne 0 ]; then
+        echo "Ошибка: не удалось создать директорию '$target_dir_path'"
+        ((errors_count++))
+        return
     fi
+
+    local unique_filename=$(get_unique_filename "$target_dir_path" "$filename")
+
+    cp "$file" "$target_dir_path/$unique_filename"
 
     if [ $? -eq 0 ]; then
-        echo "Файл '$file' скопирован как '$output_dir/$unique_path'"
-        ((files_count++))
+        if [ "$filename" != "$unique_filename" ]; then
+            echo "Файл '$file' скопирован как '$target_dir_path/$unique_filename' (решен конфликт имен)"
+            ((duplicate_count++))
+        else
+            echo "Файл '$file' скопирован в '$target_dir_path/$unique_filename'"
+        fi
     else
         echo "Ошибка при копировании: $file"
-        ((errors_count++))
     fi
 }
 
-process_file_flat() {
+process_flat() {
     local file="$1"
     local output_dir="$2"
-
-    local base_filename=$(basename "$file")
-    local unique_filename=$(get_unique_filename "" "$base_filename" "$output_dir")
+    local filename=$(basename "$file")
+    local unique_filename=$(get_unique_filename "$output_dir" "$filename")
 
     cp "$file" "$output_dir/$unique_filename"
 
     if [ $? -eq 0 ]; then
-        if [ "$base_filename" != "$unique_filename" ]; then
-            echo "Файл '$file' скопирован как '$unique_filename'"
+        if [ "$filename" != "$unique_filename" ]; then
+            echo "Файл '$file' скопирован как '$output_dir/$unique_filename' (решен конфликт имен)"
+        else
+            echo "Файл '$file' скопирован в '$output_dir/$unique_filename'"
         fi
-        ((files_count++))
     else
         echo "Ошибка при копировании: $file"
-        ((errors_count++))
     fi
 }
 
 echo "Начинаем копирование файлов из '$INPUT_DIR' в '$OUTPUT_DIR'..."
 
 if $MAX_DEPTH_SET; then
-    echo "Сохраняем структуру директорий до глубины $MAX_DEPTH"
+    echo "Режим: сохранение структуры директорий до глубины $MAX_DEPTH"
     find "$INPUT_DIR" -type f | while read -r file; do
-        process_file_with_depth "$file" "$INPUT_DIR" "$OUTPUT_DIR" "$MAX_DEPTH"
+        process_with_max_depth "$file" "$INPUT_DIR" "$OUTPUT_DIR" "$MAX_DEPTH"
     done
 else
-    echo "Копируем все файлы в корень выходной директории"
+    echo "Режим: все файлы копируются в корень выходной директории"
     find "$INPUT_DIR" -type f | while read -r file; do
-        process_file_flat "$file" "$OUTPUT_DIR"
+        process_flat "$file" "$OUTPUT_DIR"
     done
 fi
 
+echo ""
 echo "Копирование завершено!"
-echo "Скопировано файлов: $files_count"
-
-if [ $errors_count -gt 0 ]; then
-    echo "Произошло ошибок: $errors_count"
-    exit 1
-fi
 
 exit 0
